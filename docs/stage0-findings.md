@@ -40,22 +40,43 @@
    ——真正的搜索药丸框（HwSearchView）宿主。
 5. `LinearLayout`（id/navigation_container）——最底部手势导航条分隔区。
 
-## 底板原背景的实现方式
+## 底板原背景的实现方式（jadx 反编译 BlurView / SearchViewContainer 实证）
 
-- BlurView 是 App 自带的「贴背景模糊图」视图（extends View）：持有 Bitmap
-  字段 + Rect/RectF/Path/Paint，onDraw 里把一张**预先模糊好的背景位图**
-  按自身在窗口中的位置裁剪、沿顶部圆角 Path 绘制出来。
-- 也就是说 App 本来就有「底板 = 页面模糊背景的延续」的机制；位图的来源与
-  开关由上层控制器管理（代码里有 `updateBottomBlurView`、
-  `mIsBottomBlurEnabled`、`SearchBoxParams(blurRadius=…)` 等日志/类名，
-  在 classes3.dex）。
-- 页面上半部分的模糊同样走位图 + 系统材质路线：dex 字符串实证 App 调用了
-  framework 的 `com.hihonor.android.graphics.material.HnMaterial` /
-  `setHnMaterial`、`RenderEffect`，且 APK 内打包了整套 uikit 材质库
-  （`com.hihonor.uikit.hnmagicsystem.graphics.material.*`，classes5.dex，
-  含 HnFrostGlassMaterial / HnLiquidGlassMaterial）。
+荣耀搜索给底板准备了**两套渲染模式**，由云端配置 + 能力开关决定走哪套：
 
-（位图来源、底部模糊开关条件、页面模糊半径参数：jadx 反编译完成后补。）
+### 模式一：系统材质玻璃（新路径，默认未必开）
+
+- `SearchViewContainer.setTransparent(...)`（混淆名 a，静态）组装材质参数
+  （模糊度由云配置 `transparentDegree` 换算、饱和 1.3/1.1、tint
+  #3F262626/#33262626 等、圆角、shapeAlpha），最后经 `zt8.setHnMaterial(...)`
+  把 framework 的 HnMaterial 挂到 **SearchViewContainer 本身**。
+- 开关 `vi6.S()` = 云配置（`cod` 的 transparentMode 等字段下发值 == "1"）
+  **且** 非 YOYO 板式输入风格（`dre` = YoyoModeController，b() = isBoardStyle）。
+  云配置没下发到这台设备/账号时 S() 为 false，新路径整体不走。
+- S() 为真时 BlurView 完全让位：onDraw 直接 return、setSearchViewBgBlur
+  只把背景设成 `color/transparent`。
+
+### 模式二：BlurView 自绘（老路径）
+
+- `BlurView`（extends View）持有 Bitmap 字段（**1/4 尺寸的预模糊背景图**，
+  onDraw 里按 getLocationOnScreen × 0.25 算源矩形）、Rect/RectF/Path/Paint，
+  沿顶部圆角 Path 裁剪绘制。
+- 是否画位图由 `oe7.b()`（ImmersiveBlurUtil.isImmersiveBlurEnable，多项能力
+  条件的合取）决定；不满足时 onDraw 不画，靠 setSearchViewBgBlur
+  （混淆名 a(ZZ)）设置的 shape 背景（`bg_search_view_not_blur` 等纯色）。
+- **键盘弹起（fold 态）时即便位图模式开着也走纯色分支**：onDraw 内部的
+  几何条件（底板底边与预期位置对齐等）不满足时，用 CLEAR xfermode +
+  `canvas.drawColor(bg_search_input_fold_blur)` 把整块底板刷成纯色，
+  并联动 navigationBar 视图（BlurView 的 View 字段 e）的背景色。
+- **小乐截图里那块不透明悬浮白板就是这个 fold 纯色分支**（当时键盘正弹起）：
+  不是图层没对齐，是代码在键盘态主动放弃了模糊位图、改刷纯色
+  （推断链：截图状态 = 键盘弹起 + 白板纯色，与该分支的触发条件吻合；
+  是否还叠加了云配置未下发导致 S()=false，待真机看日志再定）。
+
+页面上半部分的模糊同源：App 用同一套「桌面快照 → 预模糊位图」喂给上半页
+的背景视图，并对部分容器走 HnMaterial（dex 字符串与 uikit 材质库
+`com.hihonor.uikit.hnmagicsystem.graphics.material.*` 打包在 classes5.dex，
+含 HnFrostGlassMaterial / HnLiquidGlassMaterial）。
 
 ## 本模块选定的路线
 
@@ -67,14 +88,21 @@ HnBackgroundBlurDrawable → ③ RenderEffect 兜底。
 - 路线①的「透出」不成立：页面模糊不是窗口级 blur-behind，也没有一张
   铺满全屏的模糊图层垫在底板下面——模糊是逐视图贴位图画的，底板下面
   没有现成模糊层可透；把底板单纯透明化只会露出未模糊的桌面原图。
+- 另一条理论路线是「强制打开 App 自带模式一」（hook vi6.S() 或直接调
+  setTransparent），参数是官方调校的、最「原厂」。但它受云配置对象
+  （cod 的下发值）驱动，静态无法确认在小乐设备上强开后参数完整、
+  材质真渲染（MagicGlassProbe 有过 HnMaterial 挂上但不渲染的前科），
+  风险不可控——**留作 v0.2 备选，先用路线②拿到确定的渲染再说**。
 - 路线②有真机实证：MagicGlassProbe v0.2/v0.5 已在微信进程内验证
   `HnBackgroundBlurDrawable`（createBlurDrawable → setBlurRadius /
   setSaturation / setColor → setBackground）在三方进程放行且真渲染；
   它是 SurfaceFlinger 层面对视图区域后方内容的实时模糊，与页面里
-  「桌面被模糊」的观感同源，且不依赖 App 那张位图的开关状态。
-- 配套动作：hook BlurView.onDraw 跳过其自带位图绘制（否则双重渲染发灰）、
+  「桌面被模糊」的观感同源，且不依赖 App 的云配置与位图开关状态。
+- 配套动作：hook BlurView.onDraw 跳过其自带绘制（位图/纯色都不再画）、
   清空其 Bitmap 字段、清容器叠层里的不透明 ColorDrawable 背景；
-  获焦/布局变化时校验背景是否被 App 重置、是则复用同一 Drawable 重挂。
+  hook BlurView.setSearchViewBgBlur（a(ZZ)）在其重设背景后立刻补挂；
+  BlurView 联动的 navigationBar 视图（窗口最底部导航条）也挂同一玻璃，
+  让底板直达窗口底边；获焦/布局变化时再校验一遍背景是否被重置。
 - 兜底：系统 Drawable 创建失败 → 半透明底色（至少去掉不透明白板）。
 
 ### 参数

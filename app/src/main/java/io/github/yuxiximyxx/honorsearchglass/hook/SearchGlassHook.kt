@@ -1,6 +1,7 @@
 package io.github.yuxiximyxx.honorsearchglass.hook
 
 import android.app.Activity
+import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -31,9 +32,11 @@ import java.util.WeakHashMap
  *      createBlurDrawable → setBlurRadius/setSaturation/setColor → 设为背景）；
  *   2) hook 住 BlurView.onDraw，挂载成功后跳过它自带的位图绘制，免得盖住玻璃；
  *   3) 清掉同一叠层里其它不透明背景（容器自身、home_custom_bg 等），
- *      让模糊能透到药丸框下面；
- *   4) App 在获焦/布局变化时可能重设背景——每次都检查一遍，不是我们的
- *      Drawable 就重新挂上（复用同一实例，不反复新建）。
+ *      让模糊能透到药丸框下面；BlurView 联动的 navigationBar 视图
+ *      （窗口最底部的导航条）也一并挂玻璃，底板直达窗口底边；
+ *   4) App 会通过 BlurView.setSearchViewBgBlur（混淆名 a(ZZ)）在 IME/
+ *      配置变化时重设底板背景——hook 住它，执行后立刻补挂；另在获焦/
+ *      布局变化时校验背景，不是我们的 Drawable 就复用同一实例重挂。
  *
  * 定位以资源 id 名（rl_search_view / search_blur_view）为主锚点——资源名
  * 不会被 R8 改名，比写死混淆类名稳；id 找不到时退回结构性查找
@@ -64,6 +67,8 @@ object SearchGlassHook {
     private val watched = Collections.newSetFromMap(WeakHashMap<View, Boolean>())
     @Volatile
     private var onDrawHooked = false
+    @Volatile
+    private var bgResetHooked = false
 
     fun install(module: XposedModule, classLoader: ClassLoader) {
         this.module = module
@@ -136,7 +141,32 @@ object SearchGlassHook {
         // 2) 给 BlurView 挂玻璃背景 + 停掉它自带的位图绘制
         attachGlass(blurView, act)
         hookBlurViewOnDraw(blurView.javaClass.classLoader)
+        hookBlurViewBgReset(blurView.javaClass.classLoader)
         clearBlurViewBitmap(blurView)
+        // 3) BlurView 内部联动的 navigationBar 视图（底部导航条）一并挂玻璃，
+        //    让底板直达窗口底边，而不是在导航条处断一截纯色
+        navigationBarOf(blurView)?.let { nav ->
+            runCatching { nav.alpha = 1f }
+            attachGlass(nav, act)
+        }
+    }
+
+    /** 取 BlurView 的 navigationBar 字段（按类型找 View 字段，不写死混淆名）。 */
+    private fun navigationBarOf(blurView: View): View? {
+        return runCatching {
+            var cls: Class<*>? = blurView.javaClass
+            while (cls != null && cls != View::class.java) {
+                for (field in cls.declaredFields) {
+                    if (field.type == View::class.java) {
+                        field.isAccessible = true
+                        val v = field.get(blurView) as? View
+                        if (v != null && v !== blurView) return v
+                    }
+                }
+                cls = cls.superclass
+            }
+            null
+        }.getOrNull()
     }
 
     // ---------------- 定位 ----------------
@@ -156,6 +186,7 @@ object SearchGlassHook {
             findByIdName(container, "home_custom_bg")?.let { clearTargets.add(it) }
             findByIdName(container, "home_custom_container")?.let { clearTargets.add(it) }
             findByIdName(container, "gradient_layout")?.let { clearTargets.add(it) }
+            findByIdName(container, "navigation_container")?.let { clearTargets.add(it) }
             log(
                 "定位命中（id 名）: container=${container.javaClass.name} " +
                     "blurView=${blurView?.javaClass?.name} clear=${clearTargets.size}"
@@ -251,7 +282,7 @@ object SearchGlassHook {
     // ---------------- 挂玻璃 ----------------
 
     /** 把系统背景模糊 Drawable 挂到 host 上；重复调用时校验/复用。 */
-    private fun attachGlass(host: View, act: Activity) {
+    private fun attachGlass(host: View, ctx: Context) {
         val existing = glassHosts[host]
         if (existing != null) {
             if (host.background !== existing) {
@@ -260,9 +291,9 @@ object SearchGlassHook {
             }
             return
         }
-        val drawable = createBlurDrawable(host, act) ?: run {
+        val drawable = createBlurDrawable(host, ctx) ?: run {
             log("HnBackgroundBlurDrawable 创建失败，退回半透明底色: ${host.javaClass.name}")
-            val night = isNight(act)
+            val night = isNight(ctx)
             val fallback = ColorDrawable(if (night) 0xB3242426.toInt() else 0xD9F2F2F4.toInt())
             host.background = fallback
             glassHosts[host] = fallback
@@ -273,8 +304,8 @@ object SearchGlassHook {
         log("玻璃已挂载: ${host.javaClass.name} size=${host.width}x${host.height}")
     }
 
-    private fun createBlurDrawable(host: View, act: Activity): Drawable? {
-        val cl = host.javaClass.classLoader ?: act.classLoader
+    private fun createBlurDrawable(host: View, ctx: Context): Drawable? {
+        val cl = host.javaClass.classLoader ?: ctx.classLoader
         val cls = loadClass(cl, "com.hihonor.android.graphics.drawable.HnBackgroundBlurDrawable")
             ?: loadClass(cl, "com.hihonor.android.graphics.HnBackgroundBlurDrawable")
             ?: return null
@@ -292,7 +323,7 @@ object SearchGlassHook {
             cls.getMethod("setSaturation", Float::class.javaPrimitiveType)
                 .invoke(d, BLUR_SATURATION)
         }
-        val tint = if (isNight(act)) TINT_DARK else TINT_LIGHT
+        val tint = if (isNight(ctx)) TINT_DARK else TINT_LIGHT
         step("setColor(0x${Integer.toHexString(tint)})") {
             cls.getMethod("setColor", Int::class.javaPrimitiveType).invoke(d, tint)
         }
@@ -329,6 +360,51 @@ object SearchGlassHook {
             onDrawHooked = true
             log("BlurView.onDraw hook 已安装")
         }.onFailure { log("BlurView.onDraw hook 失败（不致命，继续）", it) }
+    }
+
+    /**
+     * hook BlurView 的 setSearchViewBgBlur（混淆名 a(ZZ)，按类+签名定位）：
+     * App 在 IME 状态/配置变化时会调它重设底板与导航条的背景，会盖掉我们
+     * 的玻璃——它执行完后立刻把已挂实例的背景换回我们的 Drawable。
+     * 找不到该方法（版本变化）就静默跳过，靠获焦/布局补挂兜底。
+     */
+    private fun hookBlurViewBgReset(classLoader: ClassLoader?) {
+        if (bgResetHooked) return
+        val cl = classLoader ?: return
+        val cls = runCatching { Class.forName(BLUR_VIEW_CLASS, false, cl) }.getOrNull() ?: return
+        val method = runCatching {
+            cls.getDeclaredMethod(
+                "a",
+                Boolean::class.javaPrimitiveType,
+                Boolean::class.javaPrimitiveType
+            )
+        }.getOrNull() ?: run {
+            log("未找到 BlurView.a(ZZ)，跳过背景重置 hook（靠补挂兜底）")
+            return
+        }
+        runCatching {
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                runCatching {
+                    val self = chain.thisObject as? View
+                    if (self != null && glassHosts.containsKey(self)) {
+                        attachGlass(self, self.context)
+                    }
+                    // navigationBar 的背景也被 a() 一并改过，同样补回
+                    if (self != null) {
+                        navigationBarOf(self)?.let { nav ->
+                            if (glassHosts.containsKey(nav)) {
+                                runCatching { nav.alpha = 1f }
+                                attachGlass(nav, nav.context)
+                            }
+                        }
+                    }
+                }.onFailure { log("a() 后补挂异常（已吞）", it) }
+                result
+            }
+            bgResetHooked = true
+            log("BlurView.a(ZZ) 背景重置 hook 已安装")
+        }.onFailure { log("BlurView.a(ZZ) hook 失败（不致命，继续）", it) }
     }
 
     /** 把 BlurView 内部持有的预模糊 Bitmap 字段清空（按类型找字段，不写死混淆名）。 */
@@ -376,8 +452,8 @@ object SearchGlassHook {
         }
     }
 
-    private fun isNight(act: Activity): Boolean {
-        val mode = act.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
+    private fun isNight(ctx: Context): Boolean {
+        val mode = ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
         return mode == Configuration.UI_MODE_NIGHT_YES
     }
 
