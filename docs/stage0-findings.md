@@ -159,3 +159,61 @@ HnBackgroundBlurDrawable → ③ RenderEffect 兜底。
   GradientDrawable 胶囊（仍保圆角），不再是 v0.1.0 的直角纯色兜底。
 - 补挂：获焦/布局变化时校验药丸背景是否还是我们的 Drawable，被 App
   重设就复用同一实例重挂（glassHosts 机制保留，仅服务药丸宿主）。
+
+## v0.1.2 增补：日志断点 + search_plate 资源核对 + 新定位/重试策略
+
+### v0.1.1 真机断点（2026-11-08 用户提供的 LSPosed 日志，tag HonorSearchGlass）
+
+- hook 安装正常（ENTRY/process/「hook 已安装（v0.1.1 口径…）」各进程周期一致）。
+- 但**每一次**定位尝试都是同一结局：「HwSearchView 未命中，退回结构性查找」
+  →「[focus]/[resume] 未定位到药丸，跳过（视图树可能还没长好）」。即
+  类名查找与结构性兜底双双落空，药丸从未被挂上；用户截图像素实测药丸
+  均值 251 与原装分毫不差。底板回退同时确认恢复原样。
+- v0.1.1 机制缺陷：apply 只在 onResume(+500ms)/获焦时触发寥寥几次，且
+  已有的布局监听补挂以「已挂宿主的背景被重置」为前提——宿主从未挂上时
+  永远不会再试。HwSearchView 是 App 按 searchViewType 异步装入
+  home_custom 的，首查时很可能还没进树。
+
+### search_plate 资源归属核对（aapt2 dump 目标 APK 实证）
+
+- `search_plate` 是 **uikit 库资源**：HwSearchView 里
+  `import com.hihonor.uikit.hwsearchview.R;`，字段 e（View 型）在
+  私有方法 e() 里 `this.e = findViewById(R.id.search_plate)`，与
+  search_src_text（字段 d）、active/back_button_container 一起绑定，
+  是 search_plate 的唯一引用点。
+- 合并进 App 资源表后的常量（aapt2 dump resources 实证，包 0x7f）：
+  - `id/search_plate` = **0x7f0a0992**，entry name 就是 "search_plate"
+  - `id/search_src_text` = 0x7f0a0993
+  - `id/hwsearchview_search_text_button` = 0x7f0a0513
+  - `id/rl_search_view` = 0x7f0a093a、`id/search_blur_view` = 0x7f0a0989
+    （与 v0.1.0 命中过的两个 id 同表相邻，旁证 entry name 运行时可读）
+- 布局实证（hwsearchview_icon_hint_search_view.xml 的 xmltree）：
+  search_plate（0x7f0a0992）本体是
+  `com.hihonor.uikit.hntransmode.widgets.LightStrokeLinearLayout`，
+  search_src_text（0x7f0a0993）就在它子树内（FrameLayout 包着的小写
+  `<view>` 标签，即 HwSearchAutoComplete）——所以「按 id 名找到
+  EditText 后沿祖先链找 search_plate」在结构上成立。
+- HwSearchView 有多种布局变体（hwsearchview_*_search_view.xml 共十余个，
+  按板式/风格切换），plate 的具体形态随变体而变，但 id 名恒定——这正是
+  本版把主锚点从类名换成资源 id 名的原因。
+
+### v0.1.2 新策略
+
+- 定位优先级：①decor 全树按 id 名找 search_plate（主锚点）→ ②按 id 名
+  找 search_src_text / hwsearchview_search_text_button，沿祖先链逐层比对
+  id 名找 plate（辅锚点）→ ③类名找 HwSearchView（相等/类名包含/父类链
+  含该类三档放宽），再在其子树按 id 名找 plate → ④结构性兜底（原逻辑）。
+  命中日志统一打「药丸定位命中（锚点=…）: 类=… id名=…」，便于下一轮
+  从日志直接读出是哪条锚点命中的。
+- 持续重试：onResume 延时档位扩为 500/800/2000ms 三档；HomeActivity
+  出现后给 rl_search_view 容器（找不到则 decor）挂
+  OnGlobalLayoutListener——未定位期间每次全局布局节流（150ms）重试，
+  上限 30 次，命中即转入「已挂校验」模式（只在背景被重置时补挂，全树
+  遍历不再发生）；获焦触发保留。
+- dump 定性：重试预算耗尽仍未命中时，一次性把 rl_search_view 子树
+  （找不到容器则 decor 顶层两级）按「类名 + 资源 id 名 + 背景类型 +
+  尺寸」逐行打进日志，上限 120 个节点、只 dump 一次。即便本版仍不成，
+  下一轮凭这份 dump 就能定死药丸的真实类名/id，不再盲猜。
+- 玻璃参数与口径不变：HnBackgroundBlurDrawable radius 140 /
+  saturation 1.4 / tint 白天 0x4DFFFFFF、夜间 0x4D000000，圆角双路保形，
+  GradientBorderLayout 不碰，BlurView 完全不碰。
