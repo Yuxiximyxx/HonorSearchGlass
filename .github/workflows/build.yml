@@ -1,0 +1,37 @@
+name: Build Release APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # runner 镜像自带 Android SDK；setup-android@v3 会去装已下架的 legacy tools 包而报错，故不用它
+      - name: Install SDK platform 34
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0"
+
+      # 签名 keystore 不进仓库（.gitignore），由 secret 解码到构建脚本约定的位置
+      - name: Restore signing keystore
+        run: |
+          mkdir -p app/signing
+          echo "${{ secrets.HONORSEARCHGLASS_KEYSTORE_B64 }}" | base64 -d > app/signing/honorsearchglass.jks
+
+      - name: Build release
+        run: ./gradlew :app:assembleRelease --console=plain
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HonorSearchGlass-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

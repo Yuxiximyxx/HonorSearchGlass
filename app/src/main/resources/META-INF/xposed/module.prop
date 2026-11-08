@@ -1,0 +1,6 @@
+name=HonorSearchGlass
+description=把荣耀搜索（com.hihonor.search）底部搜索框底板改成毛玻璃，与页面自身的模糊背景统一
+minApiVersion=102
+targetApiVersion=102
+staticScope=true
+autoHotReload=false
