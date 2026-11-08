@@ -1,5 +1,5 @@
 name=HonorSearchGlass
-description=把荣耀搜索（com.hihonor.search）底部搜索框底板改成毛玻璃，与页面自身的模糊背景统一
+description=把荣耀搜索（com.hihonor.search）底部白色搜索药丸框改成毛玻璃（v0.1.1 起只改药丸框，底板保持 App 原样）
 minApiVersion=102
 targetApiVersion=102
 staticScope=true

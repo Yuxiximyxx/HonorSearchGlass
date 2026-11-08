@@ -113,3 +113,49 @@ HnBackgroundBlurDrawable → ③ RenderEffect 兜底。
 - setColor：白天 0x2EFFFFFF / 夜间 0x33000000（薄纱 tint，按 uiMode 切换）
 
 以上参数为首版取值，**待小乐真机验收后按观感再调**。
+
+## v0.1.1 增补：口径纠正（回退底板）+ 药丸框定位
+
+### 口径变化（2026-11-08，用户真机回图后纠正）
+
+- v0.1.0 真机验证：底板玻璃生效（不透明白板消失、键盘态也保持玻璃）。
+  但用户指出：**他要改的一直是那个白色药丸框（输入框本体）**，「底板」
+  是需求转述时读偏的对象；他随后进一步明确：**底板那层玻璃也不要**。
+- v0.1.1 因此定死为：**回退 v0.1.0 的全部底板改动**（不再给 BlurView
+  挂玻璃、不 hook 其 onDraw、不清其 Bitmap 字段、不清叠层不透明背景、
+  navigationBar 联动视图不再挂玻璃——底板完全恢复 App 原样渲染），
+  **只给白色药丸框挂玻璃**。共享的反射建玻璃/补挂校验机制只保留服务于
+  药丸宿主的部分，钩子触发点（Activity onResume/获焦）不再碰 BlurView。
+
+### 药丸框定位（jadx + aapt2 实证）
+
+- 布局链（activity_search_home.xml）：SearchViewContainer
+  （id/rl_search_view）→ RelativeLayout（id/home_custom_container）
+  → LinearLayout（id/home_custom_bg）→ FrameLayout（id/home_custom，
+  minHeight + app:searchViewType=1），HwSearchView 由 App 代码按
+  searchViewType 运行时装入 home_custom。
+- 药丸本体：`com.hihonor.uikit.hwsearchview.widget.HwSearchView`
+  （classes6.dex 定义，继承 androidx.appcompat.widget.SearchView）
+  内部的 **`search_plate`** 视图——HwSearchView 源码里字段 e =
+  findViewById(R.id.search_plate)，框内的 EditText 是 search_src_text
+  （HwSearchAutoComplete），「搜索」文字按钮是
+  hwsearchview_search_text_button，扫码/更多图标也在 plate 子树里。
+- 白色背景来源：search_plate 的布局/主题背景，解开后是 GradientDrawable
+  系（solid 不透明白色 + 大 cornerRadius 的全圆角胶囊）。模块运行时从
+  原背景读 cornerRadius（StateList/Layer 包装递归解开），读不到时用
+  药丸高度一半。
+- 边框：GradientBorderLayout（id/gradient_layout）是与药丸同级的独立
+  装饰视图，不承载药丸背景，模块不碰它。
+
+### v0.1.1 实现要点
+
+- 挂玻璃：同一 HnBackgroundBlurDrawable 反射路线，radius 140、
+  saturation 1.4；tint 比底板略厚——白天 0x4DFFFFFF、夜间 0x4D000000
+  （约 30% 纱），保证框内深色图标/文字与蓝色「搜索」的可读性。
+- 圆角保形：优先反射调用 Drawable 自带圆角 API（探测 setCornerRadius
+  的 (float)/(float×4)/(float[4]) 与 setCornerRadii(float[8]) 签名，
+  命中哪个用哪个并写日志）；都没有则给药丸 View 设圆角
+  OutlineProvider + clipToOutline=true 兜底。创建失败时退回半透明
+  GradientDrawable 胶囊（仍保圆角），不再是 v0.1.0 的直角纯色兜底。
+- 补挂：获焦/布局变化时校验药丸背景是否还是我们的 Drawable，被 App
+  重设就复用同一实例重挂（glassHosts 机制保留，仅服务药丸宿主）。
